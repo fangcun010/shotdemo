@@ -1,0 +1,1172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>怎样让游戏更带感</title>
+    <style>
+        #main{
+            position:absolute;
+            width:330px;
+            height:250px;
+            margin:auto;
+            top:0;
+            bottom:0;
+            left:0;
+            right:0;
+            border-radius:5px;
+            background-color: skyblue;
+        }
+        #output{
+            margin-top:5px;
+            margin-left:5px;
+        }
+    </style>
+</head>
+<body>
+<div id="main">
+<canvas id="output" width="320" height="240"></canvas>
+</div>
+<script src="engine.js"></script>
+<script src="map.js"></script>
+<script>
+    const outputCanvas=document.getElementById('output')
+    const ctx=outputCanvas.getContext('2d')
+
+    const OUTPUT_WIDTH=320
+    const OUTPUT_HEIGHT=240
+
+    const OUTPUT_SPEED_X=3
+    const OUTPUT_SPEED_Y=3.5
+
+    const GUN_OFFSET=4.5
+
+    const TILE_SIZE=32
+
+    const KEY_UP='w'
+    const KEY_DOWN='s'
+    const KEY_LEFT='a'
+    const KEY_RIGHT='d'
+    const KEY_JUMP='k'
+    const KEY_SHOOT='j'
+
+    const EVENT_KEY_UP=0
+    const EVENT_KEY_DOWN=1
+    const EVENT_KEY_LEFT=2
+    const EVENT_KEY_RIGHT=3
+    const EVENT_KEY_JUMP=4
+
+    const EVENT_GO_LEFT=5
+    const EVENT_GO_RIGHT=6
+
+    const EVENT_SHOOT=7
+    const EVENT_HIT=8
+
+    const WORLD_G=0.28
+
+    const MAX_MONSTER_COUNT=1
+
+    const MAX_BULLET_COUNT=100
+
+    const STATE_RUN=0
+    const STATE_STOP=1
+    const STATE_END=2
+    const map=TileMaps.map
+    let mapHelper
+
+    function getTime(){
+        const date=new Date()
+
+        return date.getTime()
+    }
+
+    let output
+
+    let sceneState
+    let scenePage
+    let outputPage
+    let heroImage,monsterImage,gunImage,bombImage
+    let bulletImage
+
+    let mapPage
+
+    let jumpAudio,bombAudio
+
+    let keyStatus
+    let hero
+    let monsters
+    let bullets
+
+    const STATE_HERO_STAND=0
+    const STATE_HERO_MOVING=1
+
+    const SHAKE_TIME=100
+
+    class ScreenShake{
+        constructor() {
+            this._shakeEndTime=0
+
+            this._lastUpdateTime=0
+
+            this._lastAddShakeTime=getTime()
+
+            this._stageIndex=0
+
+            this._initStage()
+        }
+
+        _initStage(){
+            this._stageInfos=[]
+
+            this._addStage({
+                x:-2,y:0
+            })
+            this._addStage({
+                x:2,y:0
+            })
+            this._addStage({
+                x:0,y:2
+            })
+            this._addStage({
+                x:0,y:-2
+            })
+        }
+
+        _addStage(info){
+            this._stageInfos.push(info)
+        }
+
+        addShake(){
+            this._shakeEndTime = getTime() +SHAKE_TIME
+        }
+
+        update(){
+            if(getTime()-this._lastUpdateTime>20){
+                this._stageIndex++
+                if(this._stageIndex>=this._stageInfos.length){
+                    this._stageIndex=0
+                }
+
+                this._lastUpdateTime=getTime()
+            }
+        }
+
+        getOffset(){
+            if(getTime()>this._shakeEndTime){
+                return {OffsetX:0,OffsetY:0}
+            }
+
+            const offsetX=this._stageInfos[this._stageIndex].x
+            const offsetY=this._stageInfos[this._stageIndex].y
+
+            return {OffsetX:offsetX,OffsetY:offsetY}
+        }
+    }
+
+    let screenShake=new ScreenShake()
+
+    class Map{
+        constructor(options={}) {
+            this._source=options.source??null
+        }
+
+        canMoveTo(x,y,width=TILE_SIZE,height=TILE_SIZE) {
+            const data=this._source.layers[0].data
+
+            const index1=this.getPointTileIndex(x,y)
+            const index2=this.getPointTileIndex(x+width-1,y)
+            const index3=this.getPointTileIndex(x,y+height-1)
+            const index4=this.getPointTileIndex(x+width-1,y+height-1)
+
+            return (data[index1]===0 && data[index2]===0 &&
+                        data[index3]===0 && data[index4]===0)
+        }
+
+        getPointTileIndex(x,y){
+            const mapWidth=this._source.width
+            const index=iDiv(y,TILE_SIZE)*mapWidth+iDiv(x,TILE_SIZE)
+
+            return index
+        }
+
+        getWall(x,y,width=TILE_SIZE,height=TILE_SIZE){
+            const wallList=[]
+
+            if(this.canMoveTo(x-1,y,width,height)===false){
+                wallList.push('left')
+            }
+            if(this.canMoveTo(x+1,y,width,height)===false){
+                wallList.push('right')
+            }
+            if(this.canMoveTo(x,y-1,width,height)===false){
+                wallList.push('up')
+            }
+            if(this.canMoveTo(x,y+1,width,height)===false){
+                wallList.push('down')
+            }
+
+            return wallList
+        }
+    }
+
+    class Hero{
+        constructor(options={}) {
+            this._x=options.x??600
+            this._y=options.y??200
+            this._isLeft=options.isLeft??false
+            this._step=options.step??0
+
+            this._gunOffset=0
+
+            this._moving_dir='right'
+
+            this._speed={x:0,y:0}
+            this._aSpeed={x:0,y:0}
+
+            this._isVisible=options.isVisible??true
+
+            this._initStateMachine()
+
+            this._eventQueue=[]
+        }
+
+        _initStateMachine(){
+            const sm=new StateMachine()
+
+            this._STATE_STAND=sm.newState()
+            this._STATE_JUMPING=sm.newState()
+            this._STATE_MOVING=sm.newState()
+            this._STATE_DEADING=sm.newState()
+            this._STATE_SHOOTING=sm.newState()
+            this._STATE_DEAD=sm.newState()
+
+            this._EVENT_JUMP=sm.newEvent()
+            this._EVENT_GO_LEFT=sm.newEvent()
+            this._EVENT_GO_RIGHT=sm.newEvent()
+            this._EVENT_DEAD=sm.newEvent()
+            this._EVENT_MOVE_END=sm.newEvent()
+            this._EVENT_SHOOT=sm.newEvent()
+            this._EVENT_SHOOT_END=sm.newEvent()
+
+            sm.addTransition(this._STATE_STAND,this._EVENT_GO_LEFT,this._STATE_MOVING,(sourceState,event,destState)=>{
+                if (mapHelper.canMoveTo(this._x, this._y + 1) === true) {
+                    return
+                }
+                this._moving_dir='left'
+                this._isLeft=true
+                this._speed.x=-4
+                this._aSpeed.x=0
+            })
+
+            sm.addTransition(this._STATE_STAND,this._EVENT_GO_RIGHT,this._STATE_MOVING,(sourceState,event,destState)=>{
+                if (mapHelper.canMoveTo(this._x, this._y + 1) === true) {
+                    return
+                }
+                this._moving_dir='right'
+                this._isLeft=false
+                this._speed.x=4
+                this._aSpeed.x=0
+            })
+
+            sm.addTransition(this._STATE_MOVING,this._EVENT_MOVE_END,this._STATE_STAND,(sourceState,event,destState)=>{
+                this._speed.x=0
+                this._aSpeed.x=0
+            })
+
+            sm.setStateUpdateAction(this._STATE_STAND,(state)=>{
+                if(keyStatus[KEY_JUMP]) {
+                    if (mapHelper.canMoveTo(this._x, this._y + 1) === false) {
+                        this._speed.y = -8
+                        this.updateJumpStep()
+                        playSound(jumpAudio)
+                        this._gunOffset=GUN_OFFSET
+                    }
+                }
+                if(keyStatus[KEY_SHOOT]){
+                    this._shoot()
+                }
+            })
+
+            sm.setStateUpdateAction(this._STATE_MOVING,(state)=>{
+                if(this._moving_dir==='left'){
+                    if(keyStatus[KEY_LEFT]===false){
+                        if(mapHelper.canMoveTo(this._x,this._y+1)===false) {
+                            this.updateJumpStep()
+                            sm.transition(this._EVENT_MOVE_END, this._STATE_STAND)
+                        }
+                    }
+                    else if(keyStatus[KEY_JUMP]===true){
+                        if(mapHelper.canMoveTo(this._x,this._y+1)===false){
+                            this._speed.y=-8
+                            this.updateJumpStep()
+                            playSound(jumpAudio)
+                            this._gunOffset=GUN_OFFSET
+                        }
+                    }
+                    else{
+                        if(mapHelper.canMoveTo(this._x,this._y+1)===false){
+                            this.updateStep()
+                        }
+                    }
+                }
+                else if(this._moving_dir==='right'){
+                    if(keyStatus[KEY_RIGHT]===false) {
+                        if(mapHelper.canMoveTo(this._x,this._y+1)===false) {
+                            this.updateJumpStep()
+                            sm.transition(this._EVENT_MOVE_END, this._STATE_STAND)
+                        }
+                    }
+                    else if(keyStatus[KEY_JUMP]===true){
+                        if(mapHelper.canMoveTo(this._x,this._y+1)===false){
+                            this._speed.y=-8
+                            this.updateJumpStep()
+                            playSound(jumpAudio)
+                            this._gunOffset=GUN_OFFSET
+                        }
+                    }
+                    else{
+                        if(mapHelper.canMoveTo(this._x,this._y+1)===false){
+                            this.updateStep()
+                        }
+                    }
+                }
+
+                if(keyStatus[KEY_SHOOT]){
+                    this._shoot()
+                }
+            })
+
+            sm.setCurrentState(this._STATE_STAND)
+
+            this._stateMachine=sm
+        }
+
+        pushEvent(event){
+            this._eventQueue.push(event)
+        }
+
+        _shoot(){
+            if(this._lastShootTime===undefined){
+                this._lastShootTime=getTime()
+            }
+            else if(getTime()-this._lastShootTime>50) {
+                for (let i = 0; i < bullets.length; i++) {
+                    const bullet = bullets[i]
+
+                    if (bullet.getState() === bullet._STATE_UNSHOOT) {
+                        if(this._moving_dir==='left') {
+                            bullet._x = this._x - 1
+                            bullet._y = this._y + 17+4
+                            bullet._aSpeed.x=-3
+                            bullet._speed.x =-6
+                        }
+                        else{
+                            bullet._x = this._x +30+6
+                            bullet._y = this._y + 17+4
+                            bullet._aSpeed.x=3
+                            bullet._speed.x = 6
+                        }
+                        bullet.pushEvent(EVENT_SHOOT)
+                        break
+                    }
+                }
+                this._lastShootTime=getTime()
+            }
+        }
+
+        AI(event){
+            switch(event){
+                case EVENT_KEY_LEFT:
+                    this._stateMachine.transition(this._EVENT_GO_LEFT)
+                    break
+                case EVENT_KEY_RIGHT:
+                    this._stateMachine.transition(this._EVENT_GO_RIGHT)
+                    break
+            }
+        }
+
+        _makeKeyEvents(){
+            if(keyStatus[KEY_UP]){
+                this.pushEvent(EVENT_KEY_UP)
+            }
+            if(keyStatus[KEY_DOWN]){
+                this.pushEvent(EVENT_KEY_DOWN)
+            }
+            if(keyStatus[KEY_LEFT]){
+                this.pushEvent(EVENT_KEY_LEFT)
+            }
+            if(keyStatus[KEY_RIGHT]){
+                this.pushEvent(EVENT_KEY_RIGHT)
+            }
+        }
+
+        updateJumpStep(){
+            if(this._step==1) {
+                this._step++
+            }
+            else if(this._step==2){
+                this._step=0
+            }
+            else if(this._step==0){
+                this._step=2
+            }
+        }
+
+        updateStep(){
+            if(this._lastUpdateStepTime===undefined){
+                this._step = iMod(this._step + 1, 3)
+                this._lastUpdateStepTime=getTime()
+            }
+            else if(getTime()-this._lastUpdateStepTime>150) {
+                this._step = iMod(this._step + 1, 3)
+                this._lastUpdateStepTime=getTime()
+            }
+        }
+
+        update(){
+            this._stateMachine.update()
+
+            this._makeKeyEvents()
+
+            for(let i=0;i<this._eventQueue.length;i++){
+                const event=this._eventQueue[i]
+
+                this.AI(event)
+            }
+
+            this._eventQueue=[]
+        }
+    }
+
+    class BulletShell{
+
+    }
+
+    class Bullet{
+        constructor(options={}){
+            this._x=options.x??0
+            this._y=options.y??0
+            this._speed={x:0,y:0}
+            this._aSpeed={x:0,y:0}
+
+            this._isVisible=options.isVisible??false
+
+            this._initStage()
+
+            this._initBombStage()
+
+            this._initStateMachine()
+
+            this._eventQueue=[]
+        }
+
+        pushEvent(event){
+            this._eventQueue.push(event)
+        }
+
+        _initStage(){
+            this._stageInfos=[]
+
+            this._addStage(10,{
+                x:128,y:114,
+                offsetX:0,offsetY:0,
+                width:14,height:14
+            })
+            this._addStage(50,{
+                x:11,y:187,
+                offsetX:0,offsetY:0,
+                width:8,height:8
+            })
+            this._addStage(80,{
+                x:23,y:187,
+                offsetX:0,offsetY:0,
+                width:13,height:8
+            })
+            this._addStage(120,{
+                x:40,y:187,
+                offsetX:0,offsetY:0,
+                width:19,height:8
+            })
+            this._addStage(170,{
+                x:63,y:187,
+                offsetX:0,offsetY:0,
+                width:30,height:8
+            })
+        }
+
+        _addStage(time,imageInfo){
+            this._stageInfos.push({time:time,imageInfo:imageInfo})
+        }
+
+        _addBombStage(time,imageInfo){
+            this._bombStageInfos.push({time:time,imageInfo:imageInfo})
+        }
+
+        _initBombStage(){
+            this._bombStageInfos=[]
+
+            let time=50
+
+            for(let i=0;i<8;i++){
+                this._addBombStage(time,{
+                    x:i*64,y:0,width:64,height:64
+                })
+                time+=50
+            }
+
+            for(let i=0;i<8;i++){
+                this._addBombStage(time,{
+                    x:i*64,y:64,width:64,height:64
+                })
+                time+=50
+            }
+        }
+
+        _initStateMachine(){
+            const sm=new StateMachine()
+
+            this._STATE_UNSHOOT=sm.newState()
+            this._STATE_MOVING=sm.newState()
+            this._STATE_BOMBING=sm.newState()
+            this._STATE_UNACTIVE=sm.newState()
+
+            this._EVENT_SHOOT=sm.newEvent()
+            this._EVENT_HIT=sm.newEvent()
+            this._EVENT_BOMB_END=sm.newEvent()
+            this._EVENT_UNACTIVE=sm.newEvent()
+
+            sm.addTransition(this._STATE_UNSHOOT,this._EVENT_SHOOT,this._STATE_MOVING,(sourceState,event,destState)=>{
+                this._timeStamp=getTime()
+                this._lastRandOffsetTime=getTime()
+                this._isVisible=true
+                this._stageIndex=0
+            })
+
+            sm.addTransition(this._STATE_MOVING,this._EVENT_HIT,this._STATE_BOMBING,(sourceState,event,destState)=>{
+                this._bombTimeStamp=getTime()
+                this._isVisible=true
+                this._bombStageIndex=0
+                playSound(bombAudio)
+                screenShake.addShake()
+            })
+
+            sm.addTransition(this._STATE_BOMBING,this._EVENT_BOMB_END,this._STATE_UNSHOOT,(sourceState,event,destState)=>{
+                this._isVisible=false
+                this._aSpeed.x=0
+                this._aSpeed.y=0
+                this._speed.x=0
+                this._speed.y=0
+            })
+
+            sm.setStateUpdateAction(this._STATE_MOVING,(state)=>{
+                if(this._stageIndex<this._stageInfos.length-1 &&
+                    getTime()-this._timeStamp>this._stageInfos[this._stageIndex].time){
+                    this._stageIndex++
+                }
+            })
+
+            sm.setStateUpdateAction(this._STATE_BOMBING,(state)=>{
+                if(getTime()-this._bombTimeStamp>this._bombStageInfos[this._bombStageIndex].time){
+                    if(this._bombStageIndex<this._bombStageInfos.length-1) {
+                        this._bombStageIndex++
+                    }
+                    else{
+                        sm.transition(this._EVENT_BOMB_END)
+                    }
+                }
+            })
+
+            sm.setCurrentState(this._STATE_UNSHOOT)
+
+            this._stateMachine=sm
+        }
+
+        getBulletImageInfo(){
+            const stageInfo=this._stageInfos[this._stageIndex]
+            return {
+                x:this._x-stageInfo.imageInfo.width/2,
+                y:this._y-stageInfo.imageInfo.height/2,
+                width:stageInfo.imageInfo.width,
+                height:stageInfo.imageInfo.height
+            }
+        }
+
+        getBombImageInfo(){
+            const stageInfo=this._bombStageInfos[this._bombStageIndex]
+            return {
+                x:this._x-stageInfo.imageInfo.width/2,
+                y:this._y-stageInfo.imageInfo.height/2,
+                width:stageInfo.imageInfo.width,
+                height:stageInfo.imageInfo.height
+            }
+        }
+
+        getState(){
+            return this._stateMachine.getCurrentState()
+        }
+
+        AI(event){
+            switch(event){
+                case EVENT_SHOOT:
+                    this._stateMachine.transition(this._EVENT_SHOOT)
+                    break
+                case EVENT_HIT:
+                    this._stateMachine.transition(this._EVENT_HIT)
+                    break
+            }
+        }
+
+        update(){
+            this._stateMachine.update()
+
+            for(let i=0;i<this._eventQueue.length;i++){
+                const event=this._eventQueue[i]
+
+                this.AI(event)
+            }
+
+            this._eventQueue=[]
+        }
+    }
+
+    const STATE_MONSTER_STAND=0
+    const STATE_MONSTER_NORMAL=1
+    const STATE_MONSTER_DEAD=2
+
+    class Monster{
+        constructor(options={}) {
+            this._x=options.x??700
+            this._y=options.y??200
+            this._isLeft=options.isLeft??false
+            this._step=options.step??0
+
+            this._speed={x:0,y:0}
+            this._aSpeed={x:0,y:0}
+
+            this._state=options.state??STATE_HERO_STAND
+
+            this._isVisible=options.isVisible??true
+
+            this._initStateMachine()
+
+            this._eventQueue=[]
+        }
+
+        _initStateMachine(){
+            const sm=new StateMachine()
+
+            this._STATE_STAND=sm.newState()
+            this._STATE_MOVING=sm.newState()
+            this._STATE_DEADING=sm.newState()
+            this._STATE_DEAD=sm.newState()
+
+            this._EVENT_GO_LEFT=sm.newEvent()
+            this._EVENT_GO_RIGHT=sm.newEvent()
+            this._EVENT_MOVE_END=sm.newEvent()
+            this._EVENT_DEAD=sm.newEvent()
+            this._EVENT_DEAD_END=sm.newEvent()
+
+            sm.addTransition(this._STATE_STAND,this._EVENT_GO_LEFT,this._STATE_MOVING,
+                (sourceState,event,destState)=>{
+                    if (mapHelper.canMoveTo(this._x, this._y + 1) === true) {
+                        return
+                    }
+                    this._moving_dir='left'
+                    this._isLeft=true
+                    this._speed.x=-2
+                    this._aSpeed.x=0
+            })
+
+            sm.addTransition(this._STATE_STAND,this._EVENT_GO_RIGHT,this._STATE_MOVING,
+                (sourceState,event,destState)=>{
+                    if (mapHelper.canMoveTo(this._x, this._y + 1) === true) {
+                        return
+                    }
+                    this._moving_dir='right'
+                    this._isLeft=false
+                    this._speed.x=2
+                    this._aSpeed.x=0
+            })
+
+            sm.addTransition(this._STATE_MOVING,this._EVENT_GO_LEFT,this._STATE_MOVING,
+                (sourceState,event,destState)=>{
+                    if (mapHelper.canMoveTo(this._x, this._y + 1) === true) {
+                        return
+                    }
+                    this._moving_dir='left'
+                    this._isLeft=true
+                    this._speed.x=-2
+                    this._aSpeed.x=0
+                })
+
+            sm.addTransition(this._STATE_MOVING,this._EVENT_GO_RIGHT,this._STATE_MOVING,
+                (sourceState,event,destState)=>{
+                    if (mapHelper.canMoveTo(this._x, this._y + 1) === true) {
+                        return
+                    }
+                    this._moving_dir='right'
+                    this._isLeft=false
+                    this._speed.x=2
+                    this._aSpeed.x=0
+                })
+
+            sm.setStateUpdateAction(this._STATE_MOVING,(state)=>{
+                this.updateStep()
+            })
+
+            sm.setCurrentState(this._STATE_STAND)
+
+            this._stateMachine=sm
+        }
+
+        pushEvent(event){
+            this._eventQueue.push(event)
+        }
+
+        AI(event){
+            switch(event){
+                case EVENT_GO_LEFT:
+                    this._stateMachine.transition(this._EVENT_GO_LEFT)
+                    break
+                case EVENT_GO_RIGHT:
+                    this._stateMachine.transition(this._EVENT_GO_RIGHT)
+                    break
+            }
+        }
+
+        _makeMoveEvents(){
+            const monsterX=this._x+TILE_SIZE/2
+            const heroX=hero._x+TILE_SIZE/2
+
+            if(monsterX>heroX){
+                this.pushEvent(EVENT_GO_LEFT)
+            }
+            else{
+                this.pushEvent(EVENT_GO_RIGHT)
+            }
+        }
+
+        updateStep(){
+            if(this._lastUpdateStepTime===undefined){
+                this._step = iMod(this._step + 1, 3)
+                this._lastUpdateStepTime=getTime()
+            }
+            else if(getTime()-this._lastUpdateStepTime>150) {
+                this._step = iMod(this._step + 1, 3)
+                this._lastUpdateStepTime=getTime()
+            }
+        }
+
+        update(){
+            this._stateMachine.update()
+
+            this._makeMoveEvents()
+
+            for(let i=0;i<this._eventQueue.length;i++){
+                const event=this._eventQueue[i]
+
+                this.AI(event)
+            }
+
+            this._eventQueue=[]
+        }
+    }
+
+    async function initImage(){
+        heroImage=await loadImage('resource/hero.png')
+        monsterImage=await loadImage('resource/monster.png')
+        gunImage=await loadImage('resource/gun.png')
+        bombImage=await loadImage('resource/bomb.png')
+        wallImage=await loadImage('resource/wall.png')
+        bulletImage=await loadImage('resource/bullet.png')
+    }
+
+    async function initAudio(){
+        jumpAudio=await loadAudio('resource/jump.wav')
+        bombAudio=await loadAudio('resource/bomb.wav')
+    }
+
+    function init(){
+        scenePage=new PaintPage({width:mapPage.getWidth(),height:mapPage.getHeight()})
+        outputPage=new PaintPage({width:OUTPUT_WIDTH,height:OUTPUT_HEIGHT})
+
+        sceneState=STATE_RUN
+    }
+
+    function initMap(){
+        mapPage=new PaintPage({width:TILE_SIZE*map.width,
+            height:TILE_SIZE*map.height})
+
+        const mapWidth=map.width
+        const mapHeight=map.height
+        const data=map.layers[0].data
+
+        mapHelper=new Map({source:map})
+
+        for(let i=0;i<mapHeight;i++){
+            for(let j=0;j<mapWidth;j++){
+                const tileID=data[i*mapWidth+j]-1
+                if(tileID>-1) {
+                    mapPage.drawImage(wallImage, tileID * TILE_SIZE, 0, TILE_SIZE, TILE_SIZE,
+                        j * TILE_SIZE, i * TILE_SIZE,TILE_SIZE,TILE_SIZE)
+                }
+            }
+        }
+    }
+
+    function initBullets(){
+        bullets=[]
+
+        for(let i=0;i<MAX_BULLET_COUNT;i++){
+            const bullet=new Bullet()
+
+            bullets.push(bullet)
+        }
+    }
+
+    function initMonsters(){
+        monsters=[]
+
+        for(let i=0;i<MAX_MONSTER_COUNT;i++){
+            monster=new Monster()
+
+            monsters.push(monster)
+        }
+    }
+
+    function initHero(){
+        hero=new Hero()
+
+        output={
+            x:hero._x,
+            y:hero._y,
+            speed:{x:0,y:0},
+            width:OUTPUT_WIDTH,height:OUTPUT_HEIGHT
+        }
+    }
+
+    async function initResource(){
+        await initImage()
+        await initAudio()
+
+
+        initMap()
+
+        initHero()
+        initMonsters()
+        initBullets()
+    }
+
+    function drawMonster(destPage,x,y,isLeft,step){
+        destPage.drawImage(monsterImage,step*TILE_SIZE,isLeft*TILE_SIZE,TILE_SIZE,TILE_SIZE,
+            x,y+2,TILE_SIZE,TILE_SIZE)
+    }
+
+    function drawHero(destPage,x,y,isLeft,step,gunOffset){
+        destPage.drawImage(heroImage,step*TILE_SIZE,isLeft*TILE_SIZE,TILE_SIZE,TILE_SIZE,
+            x,y+2,TILE_SIZE,TILE_SIZE)
+        destPage.drawImage(gunImage,0,isLeft*10,34,10,x+(isLeft?-6:6),y+18+gunOffset,34,10)
+    }
+
+    function drawBullet(destPage,bullet){
+        if(bullet.getState()===bullet._STATE_MOVING) {
+            const stageInfo = bullet._stageInfos[bullet._stageIndex]
+
+            destPage.drawImage(bulletImage, stageInfo.imageInfo.x, stageInfo.imageInfo.y,
+                stageInfo.imageInfo.width, stageInfo.imageInfo.height,
+                bullet._x - stageInfo.imageInfo.width / 2, bullet._y - stageInfo.imageInfo.height / 2,
+                stageInfo.imageInfo.width, stageInfo.imageInfo.height)
+        }
+        else if(bullet.getState()===bullet._STATE_BOMBING){
+            const bombStageInfo=bullet._bombStageInfos[bullet._bombStageIndex]
+
+            destPage.drawImage(bombImage, bombStageInfo.imageInfo.x, bombStageInfo.imageInfo.y,
+                bombStageInfo.imageInfo.width, bombStageInfo.imageInfo.height,
+                bullet._x - bombStageInfo.imageInfo.width / 2, bullet._y - bombStageInfo.imageInfo.height / 2,
+                bombStageInfo.imageInfo.width, bombStageInfo.imageInfo.height)
+        }
+    }
+
+    function drawAllBullets(){
+        for(let i=0;i<bullets.length;i++){
+            const bullet=bullets[i]
+
+            if(bullet._isVisible){
+                drawBullet(scenePage, bullet)
+            }
+        }
+    }
+
+    function drawAllMonsters(){
+        for(let i=0;i<monsters.length;i++){
+            const monster=monsters[i]
+            drawMonster(scenePage,monster._x,monster._y,monster._isLeft,monster._step)
+        }
+    }
+
+    function drawAHero(){
+        drawHero(scenePage,hero._x,hero._y,hero._isLeft,hero._step,hero._gunOffset)
+    }
+
+    function drawScene(){
+        scenePage.clear('gray')
+        scenePage.drawPage(mapPage)
+        drawAllMonsters()
+        drawAHero()
+        drawAllBullets()
+    }
+
+    function swapBuffer(srcPage){
+
+        ctx.drawImage(srcPage.getCanvas(),0,0)
+    }
+
+    function initEvents(){
+
+        keyStatus={
+            'w':false,
+            's':false,
+            'a':false,
+            'd':false,
+            'j':false,
+            'k':false
+        }
+
+        document.addEventListener('keydown',(event)=>{
+            switch(event.key){
+                case 'w':
+                case 's':
+                case 'a':
+                case 'd':
+                case 'j':
+                case 'k':
+                    keyStatus[event.key]=true
+                    break
+            }
+        })
+        document.addEventListener('keyup',(event)=>{
+            switch(event.key){
+                case 'w':
+                case 's':
+                case 'a':
+                case 'd':
+                case 'j':
+                case 'k':
+                    keyStatus[event.key]=false
+                    break
+            }
+        })
+    }
+
+    function updateAllMonsters(){
+        for(let i=0;i<monsters.length;i++){
+            const monster=monsters[i]
+            monster.update()
+
+            let destX=monster._x+monster._speed.x
+            let destY=monster._y+monster._speed.y
+
+            if(mapHelper.canMoveTo(destX,destY)===true){
+                monster._x=destX
+                monster._y=destY
+                monster._speed.x+=monster._aSpeed.x
+                monster._speed.y+=monster._aSpeed.y+WORLD_G
+            }else{
+                let lRate=0,rRate=1
+
+                while(rRate-lRate>EPS){
+                    let mRate=(lRate+rRate)/2
+                    let speedX=monster._speed.x*mRate
+                    let speedY=monster._speed.y*mRate
+
+                    let testX=monster._x+speedX
+                    let testY=monster._y+speedY
+
+                    if(mapHelper.canMoveTo(testX,testY)===true){
+                        lRate=mRate
+                    }
+                    else{
+                        rRate=mRate
+                    }
+                }
+
+                destX=monster._speed.x*lRate+monster._x
+                destY=monster._speed.y*lRate+monster._y
+
+                monster._x=destX
+                monster._y=destY
+
+                const wallList=mapHelper.getWall(destX,destY)
+
+                for(let i=0;i<wallList.length;i++){
+                    const wall=wallList[i]
+
+                    if(wall==='left'){
+                        monster._speed.x=Math.max(0,monster._speed.x)
+                        monster._speed.y=0
+                        monster._aSpeed.x=Math.max(0,monster._aSpeed.x)
+                    }
+                    else if(wall==='right'){
+                        monster._speed.x=Math.min(0,monster._speed.x)
+                        monster._speed.y=0
+                        monster._aSpeed.x=Math.min(0,monster._aSpeed.x)
+                    }
+                    else if(wall==='up'){
+                        monster._speed.y=Math.max(0,monster._speed.y)
+                        monster._aSpeed.y=Math.max(0,monster._aSpeed.y)
+                    }
+                    else if(wall==='down'){
+                        monster._speed.y=Math.min(0,monster._speed.y)
+                        monster._aSpeed.y=Math.min(0,monster._aSpeed.y)
+                    }
+                }
+            }
+        }
+    }
+
+    function updateHero(){
+        hero.update()
+        let destX=hero._x+hero._speed.x
+        let destY=hero._y+hero._speed.y
+        if(mapHelper.canMoveTo(destX,destY)===true){
+            hero._x=destX
+            hero._y=destY
+            hero._speed.x+=hero._aSpeed.x
+            hero._speed.y+=hero._aSpeed.y+WORLD_G
+            if(hero._speed.y>=0){
+                hero._gunOffset=0
+            }
+        }else{
+            let lRate=0,rRate=1
+
+            while(rRate-lRate>EPS){
+                let mRate=(lRate+rRate)/2
+                let speedX=hero._speed.x*mRate
+                let speedY=hero._speed.y*mRate
+
+                let testX=hero._x+speedX
+                let testY=hero._y+speedY
+
+                if(mapHelper.canMoveTo(testX,testY)===true){
+                    lRate=mRate
+                }
+                else{
+                    rRate=mRate
+                }
+            }
+
+            destX=hero._speed.x*lRate+hero._x
+            destY=hero._speed.y*lRate+hero._y
+
+            hero._x=destX
+            hero._y=destY
+
+            const wallList=mapHelper.getWall(destX,destY)
+
+            for(let i=0;i<wallList.length;i++){
+                const wall=wallList[i]
+
+                if(wall==='left'){
+                    hero._speed.x=Math.max(0,hero._speed.x)
+                    hero._speed.y=0
+                    hero._aSpeed.x=Math.max(0,hero._aSpeed.x)
+                }
+                else if(wall==='right'){
+                    hero._speed.x=Math.min(0,hero._speed.x)
+                    hero._speed.y=0
+                    hero._aSpeed.x=Math.min(0,hero._aSpeed.x)
+                }
+                else if(wall==='up'){
+                    hero._speed.y=Math.max(0,hero._speed.y)
+                    hero._aSpeed.y=Math.max(0,hero._aSpeed.y)
+                }
+                else if(wall==='down'){
+                    hero._speed.y=Math.min(0,hero._speed.y)
+                    hero._aSpeed.y=Math.min(0,hero._aSpeed.y)
+                }
+            }
+        }
+    }
+
+    function updateAllBullets(){
+        for(let i=0;i<bullets.length;i++){
+            const bullet=bullets[i]
+
+            bullet.update()
+
+            if(bullet.getState()===bullet._STATE_MOVING) {
+                let destX = bullet._x + bullet._speed.x
+                let destY = bullet._y + bullet._speed.y
+
+                bullet._x = destX
+                bullet._y = destY
+                bullet._speed.x += bullet._aSpeed.x
+                bullet._speed.y += bullet._aSpeed.y
+
+                if(getTime()-bullet._lastRandOffsetTime>50){
+                    const offset=(getRandomInt(200)-100)*0.01*3
+                    bullet._speed.y=bullet._speed.y+offset
+                    bullet._lastRandOffsetTime=getTime()
+                }
+
+                const bulletImageInfo=bullet.getBulletImageInfo()
+                if(mapHelper.canMoveTo(bulletImageInfo.x,bulletImageInfo.y,
+                        bulletImageInfo.width,bulletImageInfo.height)===false){
+                    bullet.pushEvent(EVENT_HIT)
+                }
+            }
+        }
+    }
+
+    function update(){
+
+        outputPage.clear('gray')
+
+        switch(sceneState){
+            case STATE_RUN:
+                updateAllMonsters()
+                updateHero()
+                updateAllBullets()
+                break;
+            case STATE_STOP:
+                break;
+            case STATE_END:
+                break;
+        }
+
+        drawScene()
+
+        const deltaX=hero._x-output.x
+        const deltaY=hero._y-output.y
+
+        const distance=Math.sqrt(deltaX*deltaX+deltaY*deltaY)
+
+        if(Math.abs(deltaX)>=80 || Math.abs(deltaY)>=20) {
+            output.speed.x=OUTPUT_SPEED_X
+            output.speed.y=OUTPUT_SPEED_Y
+        }
+        else if(distance<=0){
+            output.speed.x=0
+            output.speed.y=0
+        }
+
+        screenShake.update()
+        const shakeOffset=screenShake.getOffset()
+
+        output.x += (deltaX >= 0 ? 1 : -1) * Math.min(Math.abs(deltaX), output.speed.x)
+        output.y += (deltaY >= 0 ? 1 : -1) * Math.min(Math.abs(deltaY), output.speed.y)
+
+        outputPage.drawPage(scenePage,
+            output.x-OUTPUT_WIDTH/3+shakeOffset.OffsetX,output.y-OUTPUT_WIDTH/2+shakeOffset.OffsetY,
+            OUTPUT_WIDTH,OUTPUT_HEIGHT)
+        swapBuffer(outputPage)
+    }
+
+    initResource().then(()=>{
+        init()
+        initEvents()
+        setInterval(update,15)
+    })
+
+</script>
+</body>
+</html>
